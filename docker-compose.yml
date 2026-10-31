@@ -1,0 +1,17 @@
+services:
+
+  api-produtos:
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: api-produtos
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      PORT: 3000
+
+    restart: unless-stopped

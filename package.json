@@ -1,0 +1,25 @@
+{
+  "name": "api-produtos-aks",
+  "version": "1.0.0",
+  "description": "API de produtos desenvolvida em NodeJS para CI/CD no Azure Kubernetes Services",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/app.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sergiocotiazure20265-ops/api-produtos-aks.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/sergiocotiazure20265-ops/api-produtos-aks/issues"
+  },
+  "homepage": "https://github.com/sergiocotiazure20265-ops/api-produtos-aks#readme",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "swagger-jsdoc": "^6.3.0",
+    "swagger-ui-express": "^5.0.1"
+  }
+}
