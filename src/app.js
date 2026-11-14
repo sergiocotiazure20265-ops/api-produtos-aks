@@ -30,7 +30,7 @@ const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
     info: {
-      title: 'API de Produtos - Kubernetes AKS',
+      title: 'API de Produtos - Kubernetes AKS v1 14/11/26',
       version: '1.0.0',
       description: 'API Node.js publicada no Azure AKS'
     },
