@@ -1,0 +1,247 @@
+name: Implantar API Produtos no AKS
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-produtos-aks-main
+  cancel-in-progress: false
+
+jobs:
+
+  # ============================================================
+  # GERAR E PUBLICAR A IMAGEM NO DOCKER HUB
+  # ============================================================
+  build:
+    name: Gerar e publicar imagem Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    outputs:
+      digest: ${{ steps.imagem.outputs.digest }}
+
+    steps:
+
+      - name: Baixar o código
+        uses: actions/checkout@v6
+
+      - name: Configurar suporte a ARM64
+        uses: docker/setup-qemu-action@v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Autenticar no Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Gerar e publicar imagem
+        id: imagem
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+
+          push: true
+
+          platforms: linux/amd64,linux/arm64
+
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/api-produtos-aks:${{ github.sha }}
+
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================
+  # IMPLANTAR E VALIDAR NO AKS
+  # ============================================================
+  deploy:
+    name: Implantar e validar no AKS
+    needs: build
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      RESOURCE_GROUP: curso_azure
+      AKS_NAME: aks-produtos-sergio
+      NAMESPACE: produtos
+
+      IMAGE: >-
+        ${{ secrets.DOCKERHUB_USERNAME }}/api-produtos-aks@${{ needs.build.outputs.digest }}
+
+    steps:
+
+      - name: Baixar o código
+        uses: actions/checkout@v6
+
+      - name: Autenticar na Azure por OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Instalar kubectl e kubelogin
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          K8S_VERSION=$(az aks show \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$AKS_NAME" \
+            --query kubernetesVersion \
+            --output tsv)
+
+          az aks install-cli \
+            --client-version "v${K8S_VERSION}" \
+            --install-location "$RUNNER_TEMP/kubectl" \
+            --kubelogin-install-location "$RUNNER_TEMP/kubelogin"
+
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Conectar ao AKS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          az aks get-credentials \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$AKS_NAME" \
+            --overwrite-existing
+
+          kubelogin convert-kubeconfig -l azurecli
+
+          kubectl get deployments -n "$NAMESPACE"
+
+      - name: Preparar o Deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl set image \
+            --local \
+            -f k8s/deployment.yaml \
+            "api-produtos=$IMAGE" \
+            -o yaml > "$RUNNER_TEMP/deployment.yaml"
+
+      - name: Aplicar Deployment e Service
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl apply \
+            -f "$RUNNER_TEMP/deployment.yaml"
+
+          kubectl apply \
+            -f k8s/service.yaml
+
+      - name: Aguardar a atualização dos pods
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl rollout status \
+            deployment/api-produtos \
+            -n "$NAMESPACE" \
+            --timeout=300s
+
+      - name: Testar o endpoint de saúde
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl port-forward \
+            -n "$NAMESPACE" \
+            service/api-produtos \
+            8080:80 > "$RUNNER_TEMP/port-forward.log" 2>&1 &
+
+          PF_PID=$!
+
+          trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
+
+          for tentativa in {1..20}; do
+            echo "Teste de saúde: tentativa $tentativa de 20"
+
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              --max-time 5 \
+              http://127.0.0.1:8080/health; then
+
+              echo
+              echo "API respondeu com sucesso."
+              exit 0
+            fi
+
+            sleep 3
+          done
+
+          echo "A API não respondeu ao teste de saúde."
+
+          cat "$RUNNER_TEMP/port-forward.log"
+
+          exit 1
+
+      - name: Mostrar recursos implantados
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl get deployment api-produtos \
+            -n "$NAMESPACE"
+
+          kubectl get pods \
+            -n "$NAMESPACE" \
+            -l app=api-produtos \
+            -o wide
+
+          kubectl get service api-produtos \
+            -n "$NAMESPACE"
+
+      - name: Registrar resumo
+        shell: bash
+        run: |
+          {
+            echo "## Implantação concluída"
+            echo
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Cluster: $AKS_NAME"
+            echo "- Namespace: $NAMESPACE"
+            echo "- Teste /health: aprovado"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mostrar diagnóstico em caso de falha
+        if: failure()
+        shell: bash
+        run: |
+          kubectl get pods \
+            -n "$NAMESPACE" \
+            -o wide || true
+
+          kubectl describe deployment api-produtos \
+            -n "$NAMESPACE" || true
+
+          kubectl get events \
+            -n "$NAMESPACE" \
+            --sort-by=.metadata.creationTimestamp || true
+
+          kubectl logs \
+            -n "$NAMESPACE" \
+            -l app=api-produtos \
+            --all-containers=true \
+            --tail=100 || true
